@@ -1,26 +1,34 @@
 package com.adskip.app
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.util.Size
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -40,16 +48,39 @@ import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
+/** The three remote buttons the app presses. */
+enum class Key(val label: String, val rokuKey: String) {
+    MUTE("Mute", "VolumeMute"),
+    PLAY("Play", "Play"),
+    FF("Fast-forward", "Fwd")
+}
+
 class MainActivity : ComponentActivity() {
 
+    // ---- colors
+    private val NAVY = Color.parseColor("#0F1720")
+    private val INK = Color.parseColor("#15212C")
+    private val MUTED = Color.parseColor("#5A6A78")
+    private val LINE = Color.parseColor("#CBD3DA")
+    private val PAGE = Color.parseColor("#EDF0F3")
+    private val ACCENT = Color.parseColor("#2A4FA0")
+    private val TEAL = Color.parseColor("#0E7A6B")
+    private val RED = Color.parseColor("#C4372D")
+    private val TINT_SHOW = Color.parseColor("#E3F3EF")
+    private val TINT_AD = Color.parseColor("#FBE7E4")
+
+    // ---- control and detection
     private lateinit var ir: IrSender
     private val roku = RokuControl()
     private val detector = AdDetector()
     private val main = Handler(Looper.getMainLooper())
+    private var db: TvDb? = null
+    private var activeSet: TvDb.CodeSet? = null
 
     private val cutCount = AtomicInteger(0)
     @Volatile private var logoNow = false
@@ -64,12 +95,32 @@ class MainActivity : ComponentActivity() {
     private var executor: ExecutorService? = null
     private var provider: ProcessCameraProvider? = null
 
+    // ---- Find my TV
+    private var finding = false
+    private var findToken = 0
+    private var findList: List<Int> = emptyList()
+    private var findIdx = 0
+    private var findBrand: TvDb.Brand? = null
+    private var findAudio: AudioMeter? = null
+    private var findBaseline = Double.NaN
+    private var pendingFind = false
+    private val recentDb = CopyOnWriteArrayList<Double>()
+
+    // ---- views
     private lateinit var preview: PreviewView
+    private lateinit var statusCard: LinearLayout
     private lateinit var statusView: TextView
     private lateinit var statsView: TextView
     private lateinit var logView: TextView
     private lateinit var startBtn: Button
     private lateinit var autoBox: CheckBox
+    private lateinit var irBox: LinearLayout
+    private lateinit var rokuBox: LinearLayout
+    private lateinit var manualBox: LinearLayout
+    private lateinit var setBox: LinearLayout
+    private lateinit var brandSpinner: Spinner
+    private lateinit var setSpinner: Spinner
+    private lateinit var findBtn: Button
     private lateinit var remoteSpinner: Spinner
     private lateinit var muteEdit: EditText
     private lateinit var playEdit: EditText
@@ -83,7 +134,10 @@ class MainActivity : ComponentActivity() {
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
-        if (granted(Manifest.permission.CAMERA)) {
+        if (pendingFind) {
+            pendingFind = false
+            startFind()
+        } else if (granted(Manifest.permission.CAMERA)) {
             startRun()
         } else {
             log("Camera permission is needed to watch the TV.")
@@ -103,55 +157,159 @@ class MainActivity : ComponentActivity() {
         ir = IrSender(this)
         setContentView(buildUi())
         log(if (ir.available) "IR blaster found." else "This phone reports no IR blaster.")
+        Thread {
+            val loaded = TvDb.load(this)
+            runOnUiThread {
+                db = loaded
+                populateBrands()
+                if (loaded == null) {
+                    log("TV code database is not in this build. Manual codes and Roku still work.")
+                } else {
+                    log("Loaded codes for " + loaded.brands.size + " TV brands.")
+                }
+            }
+        }.start()
     }
 
     override fun onStop() {
         super.onStop()
+        if (finding) stopFind("Search stopped.")
         if (running) stopRun()
     }
 
-    // ---------------------------------------------------------------- UI
+    // ------------------------------------------------------------ UI helpers
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun rounded(fill: Int, radiusDp: Int, stroke: Int? = null): GradientDrawable {
+        val g = GradientDrawable()
+        g.setColor(fill)
+        g.cornerRadius = dp(radiusDp).toFloat()
+        if (stroke != null) g.setStroke(dp(1), stroke)
+        return g
+    }
+
+    private fun text(s: String, size: Float = 14f, color: Int = INK, bold: Boolean = false): TextView {
+        val t = TextView(this)
+        t.text = s
+        t.textSize = size
+        t.setTextColor(color)
+        if (bold) t.setTypeface(t.typeface, Typeface.BOLD)
+        return t
+    }
+
+    private fun put(parent: LinearLayout, v: View, top: Int = 10, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT) {
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
+        lp.topMargin = dp(top)
+        parent.addView(v, lp)
+    }
+
+    private fun card(parent: LinearLayout, title: String?): LinearLayout {
+        val c = LinearLayout(this)
+        c.orientation = LinearLayout.VERTICAL
+        c.background = rounded(Color.WHITE, 14, LINE)
+        c.setPadding(dp(14), dp(14), dp(14), dp(14))
+        put(parent, c, 12)
+        if (title != null) {
+            val t = text(title.uppercase(Locale.US), 12f, MUTED, true)
+            t.letterSpacing = 0.08f
+            c.addView(t)
+        }
+        return c
+    }
+
+    private fun styledButton(label: String, primary: Boolean): Button {
+        val b = Button(this)
+        b.text = label
+        b.isAllCaps = false
+        b.textSize = 15f
+        b.setTextColor(if (primary) Color.WHITE else INK)
+        val bg = rounded(if (primary) ACCENT else Color.WHITE, 10, if (primary) null else LINE)
+        b.background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#33000000")), bg, null)
+        b.minHeight = dp(48)
+        b.minimumHeight = dp(48)
+        b.stateListAnimator = null
+        return b
+    }
+
+    private fun field(hint: String, mono: Boolean = true): EditText {
+        val e = EditText(this)
+        e.hint = hint
+        e.setSingleLine()
+        e.textSize = 15f
+        e.setTextColor(INK)
+        if (mono) e.typeface = Typeface.MONOSPACE
+        e.background = rounded(Color.WHITE, 8, LINE)
+        e.setPadding(dp(12), dp(10), dp(12), dp(10))
+        return e
+    }
+
+    private fun hexField(hint: String): EditText {
+        val e = field(hint)
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        return e
+    }
+
+    private fun hex(v: Long): String =
+        if (v == 0L) "" else String.format(Locale.US, "%08X", v)
+
+    // ------------------------------------------------------------------ UI
 
     private fun buildUi(): View {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(16), dp(16), dp(16), dp(32))
 
-        fun add(v: View, top: Int = 12, height: Int = ViewGroup.LayoutParams.WRAP_CONTENT) {
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height)
-            lp.topMargin = dp(top)
-            col.addView(v, lp)
-        }
+        // header with the logo
+        val header = LinearLayout(this)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
+        header.background = rounded(NAVY, 18)
+        header.setPadding(dp(14), dp(12), dp(16), dp(12))
+        val logo = ImageView(this)
+        logo.setImageResource(R.drawable.ic_launcher_foreground)
+        logo.scaleType = ImageView.ScaleType.FIT_CENTER
+        header.addView(logo, LinearLayout.LayoutParams(dp(72), dp(72)))
+        val titles = LinearLayout(this)
+        titles.orientation = LinearLayout.VERTICAL
+        titles.addView(text(getString(R.string.app_name), 24f, Color.WHITE, true))
+        titles.addView(text(getString(R.string.tagline), 14f, Color.parseColor("#9FB3C8")))
+        val tlp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        tlp.leftMargin = dp(8)
+        header.addView(titles, tlp)
+        col.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        fun label(s: String, size: Float = 14f, bold: Boolean = false): TextView {
-            val t = TextView(this)
-            t.text = s
-            t.textSize = size
-            if (bold) t.setTypeface(t.typeface, Typeface.BOLD)
-            return t
-        }
-
-        add(label("Ad Skip", 28f, true), 0)
-        add(label("Prop the phone up so the camera fills its view with the TV, plug it in, and tap Start. Keep this screen open."), 4)
-
+        // camera preview
         preview = PreviewView(this)
-        add(preview, 12, dp(240))
+        preview.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        preview.setBackgroundColor(NAVY)
+        preview.outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, dp(14).toFloat())
+            }
+        }
+        preview.clipToOutline = true
+        put(col, preview, 12, dp(220))
 
-        statusView = label("SHOW", 36f, true)
-        statusView.setTextColor(Color.rgb(14, 122, 107))
-        add(statusView, 8)
-        statsView = label("Not watching yet.", 13f)
+        // status
+        statusCard = LinearLayout(this)
+        statusCard.orientation = LinearLayout.VERTICAL
+        statusCard.background = rounded(TINT_SHOW, 14)
+        statusCard.setPadding(dp(16), dp(12), dp(16), dp(12))
+        put(col, statusCard, 12)
+        statusView = text("SHOW", 40f, TEAL, true)
+        statusCard.addView(statusView)
+        statsView = text("Not watching yet.", 13f, MUTED)
         statsView.typeface = Typeface.MONOSPACE
-        add(statsView, 0)
+        statusCard.addView(statsView)
 
-        startBtn = Button(this)
-        startBtn.text = "Start watching"
+        startBtn = styledButton("Start watching", true)
         startBtn.setOnClickListener { if (running) stopRun() else begin() }
-        add(startBtn, 12)
+        put(col, startBtn, 12)
+        put(col, text("Prop the phone up so the camera fills its view with the TV, plug it in, and keep this screen open.", 13f, MUTED), 6)
 
-        add(label("What are you watching?", 14f, true), 20)
+        // what are you watching + sensitivity
+        val watchCard = card(col, "What are you watching?")
         val modeGroup = RadioGroup(this)
         val recBtn = RadioButton(this)
         recBtn.text = "Recorded show (fast-forward the ad)"
@@ -165,9 +323,8 @@ class MainActivity : ComponentActivity() {
         modeGroup.setOnCheckedChangeListener { _, id ->
             detector.mode = if (id == recBtn.id) Mode.RECORDED else Mode.LIVE
         }
-        add(modeGroup, 4)
-
-        add(label("Sensitivity (higher flags more as ads)", 14f, true), 16)
+        put(watchCard, modeGroup, 6)
+        put(watchCard, text("Sensitivity (higher flags more as ads)", 14f, INK, true), 14)
         val seek = SeekBar(this)
         seek.max = 100
         seek.progress = 50
@@ -178,12 +335,13 @@ class MainActivity : ComponentActivity() {
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
-        add(seek, 4)
+        put(watchCard, seek, 4)
 
-        add(label("How do you control the TV?", 14f, true), 20)
+        // TV control
+        val tvCard = card(col, "Your TV")
         val ctlGroup = RadioGroup(this)
         val irBtn = RadioButton(this)
-        irBtn.text = "IR blaster (TV remote codes)"
+        irBtn.text = "IR blaster (any TV)"
         irBtn.id = View.generateViewId()
         val rokuBtn = RadioButton(this)
         rokuBtn.text = "Roku over Wi-Fi"
@@ -191,18 +349,84 @@ class MainActivity : ComponentActivity() {
         ctlGroup.addView(irBtn)
         ctlGroup.addView(rokuBtn)
         ctlGroup.check(irBtn.id)
-        ctlGroup.setOnCheckedChangeListener { _, id -> useRoku = (id == rokuBtn.id) }
-        add(ctlGroup, 4)
+        ctlGroup.setOnCheckedChangeListener { _, id ->
+            useRoku = (id == rokuBtn.id)
+            refreshControlUi()
+        }
+        put(tvCard, ctlGroup, 6)
 
-        add(label("Roku: IP address (Roku Settings > Network > About), or tap Find Roku"), 12)
-        rokuIpEdit = EditText(this)
-        rokuIpEdit.hint = "for example 192.168.1.50"
-        rokuIpEdit.setSingleLine()
-        rokuIpEdit.typeface = Typeface.MONOSPACE
-        add(rokuIpEdit, 0)
-        val findBtn = Button(this)
-        findBtn.text = "Find Roku"
-        findBtn.setOnClickListener {
+        // IR: brand, code set, Find my TV, manual codes
+        irBox = LinearLayout(this)
+        irBox.orientation = LinearLayout.VERTICAL
+        put(tvCard, irBox, 6)
+        put(irBox, text("TV brand", 14f, INK, true), 6)
+        brandSpinner = Spinner(this)
+        brandSpinner.adapter = spinnerAdapter(listOf(MANUAL_LABEL))
+        put(irBox, brandSpinner, 2)
+
+        setBox = LinearLayout(this)
+        setBox.orientation = LinearLayout.VERTICAL
+        put(irBox, setBox, 6)
+        put(setBox, text("Code set (try another if a button does nothing)", 14f, INK, true), 0)
+        setSpinner = Spinner(this)
+        put(setBox, setSpinner, 2)
+
+        findBtn = styledButton("Find my TV", false)
+        findBtn.setOnClickListener { findClicked() }
+        put(irBox, findBtn, 10)
+        put(irBox, text("Find my TV tries this brand's mute codes while listening. Have the TV playing with sound and the phone aimed at it. Some codes may flash a menu.", 12f, MUTED), 4)
+
+        manualBox = LinearLayout(this)
+        manualBox.orientation = LinearLayout.VERTICAL
+        put(irBox, manualBox, 8)
+        remoteSpinner = Spinner(this)
+        remoteSpinner.adapter = spinnerAdapter(Remotes.all.map { it.name })
+        put(manualBox, remoteSpinner, 0)
+        muteEdit = hexField("Mute (8 hex digits)")
+        playEdit = hexField("Play (8 hex digits)")
+        ffEdit = hexField("Fast-forward (8 hex digits)")
+        put(manualBox, text("Mute", 13f, MUTED), 8)
+        put(manualBox, muteEdit, 2)
+        put(manualBox, text("Play", 13f, MUTED), 8)
+        put(manualBox, playEdit, 2)
+        put(manualBox, text("Fast-forward", 13f, MUTED), 8)
+        put(manualBox, ffEdit, 2)
+        remoteSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                val r = Remotes.all[pos]
+                muteEdit.setText(hex(r.mute))
+                playEdit.setText(hex(r.play))
+                ffEdit.setText(hex(r.ff))
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        brandSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                onBrandChosen(pos)
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        setSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                val d = db ?: return
+                val bp = brandSpinner.selectedItemPosition
+                if (bp <= 0 || bp > d.brands.size) return
+                val sets = d.brands[bp - 1].sets
+                if (pos in sets.indices) activeSet = sets[pos]
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Roku
+        rokuBox = LinearLayout(this)
+        rokuBox.orientation = LinearLayout.VERTICAL
+        put(tvCard, rokuBox, 6)
+        put(rokuBox, text("Roku IP address (Roku Settings > Network > About), or tap Find Roku", 14f, INK, true), 6)
+        rokuIpEdit = field("for example 192.168.1.50")
+        put(rokuBox, rokuIpEdit, 4)
+        val findRoku = styledButton("Find Roku", false)
+        findRoku.setOnClickListener {
             log("Looking for a Roku on Wi-Fi...")
             roku.discover(this) { ip ->
                 runOnUiThread {
@@ -215,84 +439,80 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        add(findBtn, 4)
-        add(label("If a Roku key does nothing, check Roku Settings > System > Advanced system settings > Control by mobile apps, and allow network access."), 4)
+        put(rokuBox, findRoku, 8)
+        put(rokuBox, text("If a Roku key does nothing, open Roku Settings > System > Advanced system settings > Control by mobile apps and allow network access.", 12f, MUTED), 6)
 
-        add(label("IR remote codes", 14f, true), 20)
-        remoteSpinner = Spinner(this)
-        remoteSpinner.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item, Remotes.all.map { it.name }
-        )
-        add(remoteSpinner, 4)
-
-        muteEdit = hexField("Mute (8 hex digits)")
-        playEdit = hexField("Play (8 hex digits)")
-        ffEdit = hexField("Fast-forward (8 hex digits)")
-        add(label("Mute"), 8)
-        add(muteEdit, 0)
-        add(label("Play"), 4)
-        add(playEdit, 0)
-        add(label("Fast-forward"), 4)
-        add(ffEdit, 0)
-
-        remoteSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                val r = Remotes.all[pos]
-                muteEdit.setText(hex(r.mute))
-                playEdit.setText(hex(r.play))
-                ffEdit.setText(hex(r.ff))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-
-        add(label("Test each button with the phone aimed at the TV:"), 12)
+        // test buttons
+        put(tvCard, text("Test with the phone aimed at the TV", 14f, INK, true), 14)
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
-        val tests = listOf(
-            Triple("Mute", muteEdit, "VolumeMute"),
-            Triple("Play", playEdit, "Play"),
-            Triple("FF", ffEdit, "Fwd")
-        )
-        for (item in tests) {
-            val b = Button(this)
-            b.text = item.first
-            b.setOnClickListener { send(item.first, item.second, item.third, true) }
-            row.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        for (k in listOf(Key.MUTE, Key.PLAY, Key.FF)) {
+            val b = styledButton(if (k == Key.FF) "FF" else k.label, false)
+            b.setOnClickListener { send(k, true) }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            lp.rightMargin = dp(6)
+            row.addView(b, lp)
         }
-        add(row, 4)
+        put(tvCard, row, 6)
 
         autoBox = CheckBox(this)
         autoBox.text = "Send commands automatically when an ad starts and ends"
         autoBox.isChecked = false
-        add(autoBox, 12)
+        put(tvCard, autoBox, 12)
 
-        add(label("Log", 14f, true), 20)
-        logView = label("", 12f)
+        // log and debug
+        val logCard = card(col, "Log")
+        logView = text("", 12f, INK)
         logView.typeface = Typeface.MONOSPACE
-        add(logView, 4)
-
-        val copyBtn = Button(this)
-        copyBtn.text = "Copy debug data"
+        put(logCard, logView, 6)
+        val copyBtn = styledButton("Copy debug data", false)
         copyBtn.setOnClickListener { copyDebug() }
-        add(copyBtn, 12)
-        add(label("After a bad stretch, tap this and paste the result into your chat with Claude."), 4)
+        put(logCard, copyBtn, 12)
+        put(logCard, text("After a bad stretch, tap this and paste the result into your chat with Claude.", 12f, MUTED), 4)
 
         val scroll = ScrollView(this)
+        scroll.setBackgroundColor(PAGE)
         scroll.addView(col)
+        refreshControlUi()
         return scroll
     }
 
-    private fun hexField(hint: String): EditText {
-        val e = EditText(this)
-        e.hint = hint
-        e.setSingleLine()
-        e.typeface = Typeface.MONOSPACE
-        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-        return e
+    private fun spinnerAdapter(items: List<String>): ArrayAdapter<String> =
+        ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+
+    private fun refreshControlUi() {
+        irBox.visibility = if (useRoku) View.GONE else View.VISIBLE
+        rokuBox.visibility = if (useRoku) View.VISIBLE else View.GONE
+        val manual = brandSpinner.selectedItemPosition <= 0
+        manualBox.visibility = if (manual) View.VISIBLE else View.GONE
+        setBox.visibility = if (manual) View.GONE else View.VISIBLE
+        findBtn.visibility = if (manual) View.GONE else View.VISIBLE
     }
 
-    private fun hex(v: Long): String =
-        if (v == 0L) "" else String.format(Locale.US, "%08X", v)
+    private fun populateBrands() {
+        val d = db
+        val names = ArrayList<String>()
+        names.add(MANUAL_LABEL)
+        if (d != null) for (b in d.brands) names.add(b.name)
+        brandSpinner.adapter = spinnerAdapter(names)
+        brandSpinner.setSelection(0)
+        refreshControlUi()
+    }
+
+    private fun onBrandChosen(pos: Int) {
+        val d = db
+        if (pos <= 0 || d == null || pos > d.brands.size) {
+            activeSet = null
+        } else {
+            val sets = d.brands[pos - 1].sets
+            setSpinner.adapter = spinnerAdapter(sets.map { it.summary() })
+            var best = sets.indexOfFirst { it.play >= 0 && it.ff >= 0 }
+            if (best < 0) best = 0
+            setSpinner.setSelection(best)
+            activeSet = sets[best]
+        }
+        refreshControlUi()
+    }
 
     // ----------------------------------------------------------- permissions
 
@@ -300,6 +520,7 @@ class MainActivity : ComponentActivity() {
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
     private fun begin() {
+        if (finding) stopFind("Search stopped.")
         val need = ArrayList<String>()
         if (!granted(Manifest.permission.CAMERA)) need.add(Manifest.permission.CAMERA)
         if (!granted(Manifest.permission.RECORD_AUDIO)) need.add(Manifest.permission.RECORD_AUDIO)
@@ -332,7 +553,7 @@ class MainActivity : ComponentActivity() {
         }, ContextCompat.getMainExecutor(this))
 
         if (granted(Manifest.permission.RECORD_AUDIO)) {
-            val meter = AudioMeter { db -> dbNow = db }
+            val meter = AudioMeter { v -> dbNow = v }
             meter.start()
             audio = meter
         } else {
@@ -377,10 +598,15 @@ class MainActivity : ComponentActivity() {
         startBtn.text = "Start watching"
         if (wasInAd) onAdChange(false, " (stopped)")
         detector.reset()
-        statusView.text = "SHOW"
-        statusView.setTextColor(Color.rgb(14, 122, 107))
+        showStatus(false)
         statsView.text = "Not watching."
         log("Stopped.")
+    }
+
+    private fun showStatus(ad: Boolean) {
+        statusView.text = if (ad) "AD" else "SHOW"
+        statusView.setTextColor(if (ad) RED else TEAL)
+        statusCard.background = rounded(if (ad) TINT_AD else TINT_SHOW, 14)
     }
 
     private fun step() {
@@ -400,8 +626,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val ad = detector.inAd
-        statusView.text = if (ad) "AD" else "SHOW"
-        statusView.setTextColor(if (ad) Color.rgb(196, 55, 45) else Color.rgb(14, 122, 107))
+        showStatus(ad)
         val vol = if (r.dbDelta == null) "n/a" else String.format(Locale.US, "%+.1f dB", r.dbDelta)
         statsView.text = String.format(
             Locale.US,
@@ -426,12 +651,10 @@ class MainActivity : ComponentActivity() {
         if (inAd) {
             adStart = SystemClock.elapsedRealtime()
             log("Ad started.")
-            if (detector.mode == Mode.RECORDED) send("FAST_FORWARD", ffEdit, "Fwd", false)
-            else send("MUTE", muteEdit, "VolumeMute", false)
+            if (detector.mode == Mode.RECORDED) send(Key.FF, false) else send(Key.MUTE, false)
         } else {
             log("Show is back.$note")
-            if (detector.mode == Mode.RECORDED) send("PLAY", playEdit, "Play", false)
-            else send("MUTE (restore)", muteEdit, "VolumeMute", false)
+            if (detector.mode == Mode.RECORDED) send(Key.PLAY, false) else send(Key.MUTE, false)
         }
     }
 
@@ -444,47 +667,227 @@ class MainActivity : ComponentActivity() {
         val text = "mode=${detector.mode} sensitivity=${detector.sensitivity}\n" +
             header + "\n" + debugRows.joinToString("\n")
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("adskip debug", text))
+        cm.setPrimaryClip(ClipData.newPlainText("debug data", text))
         Toast.makeText(this, "Copied " + debugRows.size + " rows", Toast.LENGTH_SHORT).show()
         log("Copied " + debugRows.size + " rows of debug data.")
     }
 
     // ------------------------------------------------------------- sending
 
-    private fun send(name: String, field: EditText, rokuKey: String, force: Boolean) {
+    private fun send(key: Key, force: Boolean) {
         if (!force && !autoBox.isChecked) {
-            log("$name (not sent, automatic sending is off)")
+            log(key.label + " (not sent, automatic sending is off)")
             return
         }
         if (useRoku) {
             val ip = rokuIpEdit.text.toString().trim()
             if (!roku.valid(ip)) {
-                log("$name: enter the Roku's IP address first.")
+                log(key.label + ": enter the Roku's IP address first.")
                 return
             }
             roku.host = ip
-            roku.keypress(rokuKey) { ok, msg ->
-                runOnUiThread { log("$name via Roku: " + (if (ok) "sent." else "failed ($msg).")) }
+            roku.keypress(key.rokuKey) { ok, msg ->
+                runOnUiThread { log(key.label + " via Roku: " + (if (ok) "sent." else "failed ($msg).")) }
             }
             return
+        }
+        if (!ir.available) {
+            log(key.label + ": this phone reports no IR blaster.")
+            return
+        }
+        val set = activeSet
+        val d = db
+        if (set != null && d != null) {
+            val idx = when (key) {
+                Key.MUTE -> set.mute
+                Key.PLAY -> set.play
+                Key.FF -> set.ff
+            }
+            val raw = d.pattern(idx)
+            if (raw == null) {
+                log(key.label + ": this code set has no such button. Try another set.")
+                return
+            }
+            log(if (ir.sendRaw(raw.freq, raw.timings)) key.label + " sent." else key.label + " failed to send.")
+            return
+        }
+        val field = when (key) {
+            Key.MUTE -> muteEdit
+            Key.PLAY -> playEdit
+            Key.FF -> ffEdit
         }
         val proto = Remotes.all[remoteSpinner.selectedItemPosition].proto
         val text = field.text.toString().trim().removePrefix("0x").removePrefix("0X")
         val value = text.toLongOrNull(16)
         if (value == null || value < 0L || value > 0xFFFFFFFFL) {
-            log("$name: enter a code as 8 hex digits.")
+            log(key.label + ": enter a code as 8 hex digits.")
+            return
+        }
+        log(if (ir.send(proto, value)) key.label + " sent." else key.label + " failed to send.")
+    }
+
+    // --------------------------------------------------------- Find my TV
+
+    private fun findClicked() {
+        if (finding) {
+            stopFind("Search stopped.")
+            return
+        }
+        if (running) {
+            log("Stop watching before searching for your TV.")
+            return
+        }
+        val d = db
+        val pos = brandSpinner.selectedItemPosition
+        if (d == null || pos <= 0 || pos > d.brands.size) {
+            log("Pick a TV brand first.")
             return
         }
         if (!ir.available) {
-            log("$name: this phone reports no IR blaster.")
+            log("This phone reports no IR blaster.")
             return
         }
-        log(if (ir.send(proto, value)) "$name sent." else "$name failed to send.")
+        if (!granted(Manifest.permission.RECORD_AUDIO)) {
+            pendingFind = true
+            permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+            return
+        }
+        startFind()
+    }
+
+    private fun startFind() {
+        val d = db ?: return
+        val pos = brandSpinner.selectedItemPosition
+        if (pos <= 0 || pos > d.brands.size) return
+        val brand = d.brands[pos - 1]
+        findBrand = brand
+        findList = d.uniqueMutes(brand)
+        findIdx = 0
+        findBaseline = Double.NaN
+        recentDb.clear()
+        findToken++
+        finding = true
+        findBtn.text = "Stop searching"
+        if (granted(Manifest.permission.RECORD_AUDIO)) {
+            val meter = AudioMeter { v ->
+                recentDb.add(v)
+                while (recentDb.size > 8) recentDb.removeAt(0)
+            }
+            meter.start()
+            findAudio = meter
+        }
+        log("Searching " + brand.name + ": " + findList.size + " codes. Keep the TV playing with sound.")
+        postFind(1500) { findNext() }
+    }
+
+    private fun postFind(delayMs: Long, action: () -> Unit) {
+        val token = findToken
+        main.postDelayed({
+            if (finding && token == findToken) action()
+        }, delayMs)
+    }
+
+    private fun avgLast(n: Int): Double {
+        val l = recentDb.toList()
+        if (l.size < n) return Double.NaN
+        var s = 0.0
+        for (i in l.size - n until l.size) s += l[i]
+        return s / n
+    }
+
+    private fun findNext() {
+        val d = db
+        val brand = findBrand
+        if (d == null || brand == null) {
+            stopFind("Search stopped.")
+            return
+        }
+        if (findIdx >= findList.size) {
+            stopFind("No " + brand.name + " code muted the TV. Try another brand or code set.")
+            return
+        }
+        val idx = findList[findIdx]
+        val raw = d.pattern(idx)
+        if (raw == null) {
+            findIdx++
+            postFind(50) { findNext() }
+            return
+        }
+        findBaseline = avgLast(2)
+        ir.sendRaw(raw.freq, raw.timings)
+        log("Trying code " + (findIdx + 1) + " of " + findList.size + "...")
+        postFind(1700) { evaluateFind(idx) }
+    }
+
+    private fun evaluateFind(idx: Int) {
+        val after = avgLast(2)
+        val base = findBaseline
+        val heard = !base.isNaN() && !after.isNaN() && base > -45.0
+        if (heard) {
+            if (after < base - 8.0) {
+                confirmFind(idx)
+            } else {
+                findIdx++
+                postFind(300) { findNext() }
+            }
+        } else {
+            // No usable microphone reading, so ask the person.
+            confirmFind(idx)
+        }
+    }
+
+    private fun confirmFind(idx: Int) {
+        AlertDialog.Builder(this)
+            .setTitle("Did the TV mute?")
+            .setMessage("Code " + (findIdx + 1) + " of " + findList.size)
+            .setCancelable(false)
+            .setPositiveButton("Yes") { _, _ -> acceptFind(idx) }
+            .setNegativeButton("No") { _, _ ->
+                findIdx++
+                postFind(300) { findNext() }
+            }
+            .setNeutralButton("Stop") { _, _ -> stopFind("Search stopped.") }
+            .show()
+    }
+
+    private fun acceptFind(idx: Int) {
+        val d = db
+        val brand = findBrand
+        if (d == null || brand == null) {
+            stopFind("Search stopped.")
+            return
+        }
+        var chosen = brand.sets.firstOrNull { it.mute == idx && it.play >= 0 && it.ff >= 0 }
+        if (chosen == null) chosen = brand.sets.firstOrNull { it.mute == idx }
+        if (chosen != null) {
+            val at = brand.sets.indexOf(chosen)
+            setSpinner.setSelection(at)
+            activeSet = chosen
+        }
+        // Mute is a toggle, so send it once more to bring the sound back.
+        val raw = d.pattern(idx)
+        if (raw != null) main.postDelayed({ ir.sendRaw(raw.freq, raw.timings) }, 800)
+        val note = if (chosen == null) "" else
+            " Using " + chosen.id + (if (chosen.ff < 0) ". It has no fast-forward code, so try another set." else ".")
+        stopFind("Found your TV's mute code." + note)
+    }
+
+    private fun stopFind(msg: String) {
+        findToken++
+        finding = false
+        findAudio?.stop()
+        findAudio = null
+        findBtn.text = "Find my TV"
+        log(msg)
     }
 
     private fun log(s: String) {
         logLines.add(clock.format(Date()) + "  " + s)
         while (logLines.size > 40) logLines.removeAt(0)
         logView.text = logLines.joinToString("\n")
+    }
+
+    companion object {
+        private const val MANUAL_LABEL = "Manual codes (Samsung, LG, custom)"
     }
 }

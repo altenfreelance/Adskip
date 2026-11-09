@@ -14,6 +14,16 @@ class IrSender(context: Context) {
             false
         }
 
+    fun sendRaw(freq: Int, timings: IntArray): Boolean {
+        val m = mgr ?: return false
+        return try {
+            m.transmit(freq, timings)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun send(proto: Proto, value: Long): Boolean {
         val m = mgr ?: return false
         return try {

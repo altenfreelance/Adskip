@@ -1,4 +1,4 @@
-# Ad Skip
+# Commercial Skip
 
 Android app that watches a TV with the phone camera and microphone, detects
 commercial breaks, and sends IR commands (fast-forward or mute) through the
@@ -7,12 +7,12 @@ phone's IR blaster.
 ## Build
 
 Push to `main`. GitHub Actions builds `app-debug.apk` and attaches it to a
-release named "Ad Skip build N". Open the Releases page on the phone, download
+release named "Commercial Skip build N". Open the Releases page on the phone, download
 the APK and install it (allow "install unknown apps" for your browser when asked).
 
 ## Controlling the TV
 
-- **IR blaster:** uses the phone's IR blaster. Built-in codes cover Samsung and LG. For other TVs type the codes in by hand.
+- **IR blaster:** uses the phone's IR blaster. Pick your TV brand, then tap Find my TV. It tries that brand's mute codes while listening, and stops when the sound drops. You can also pick a code set by hand, or type codes in.
 - **Roku over Wi-Fi:** works with Roku players and Roku TVs, no IR codes needed. Tap Find Roku, or type the Roku's IP address.
 
 ## First run
@@ -38,3 +38,8 @@ the APK and install it (allow "install unknown apps" for your browser when asked
 Every pull request runs the unit tests and a full debug build. Only code that
 lands on `main` publishes a release with the APK. To make that a hard rule, turn on
 GitHub branch protection for `main` and require the "build" check to pass.
+
+## Credits
+
+TV remote codes come from the open [Flipper-IRDB](https://github.com/UberGuidoZ/Flipper-IRDB)
+database (CC0). The build downloads it and turns it into `tvcodes.json` with `tools/build_tv_codes.py`.

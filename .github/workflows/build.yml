@@ -17,6 +17,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fetch the open TV remote code database (CC0)
+        uses: actions/checkout@v4
+        with:
+          repository: UberGuidoZ/Flipper-IRDB
+          path: irdb
+          sparse-checkout: TVs
+          filter: blob:none
+
+      - name: Test the code table builder
+        run: python3 -m unittest discover -s tools -v
+
+      - name: Build the TV code table for the app
+        continue-on-error: true
+        run: python3 tools/build_tv_codes.py irdb/TVs app/src/main/assets/tvcodes.json
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -47,5 +62,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Ad Skip build ${{ github.run_number }}
+          name: Commercial Skip build ${{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
