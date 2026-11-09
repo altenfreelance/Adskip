@@ -130,6 +130,8 @@ class MainActivity : ComponentActivity() {
     private val logLines = ArrayList<String>()
     private val debugRows = ArrayList<String>()
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private val prefs by lazy { getSharedPreferences("commercial_skip", Context.MODE_PRIVATE) }
+    private var pendingSetId: String? = null
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -175,6 +177,23 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         if (finding) stopFind("Search stopped.")
         if (running) stopRun()
+        savePrefs()
+    }
+
+    private fun savePrefs() {
+        val bp = brandSpinner.selectedItemPosition
+        val d = db
+        val brandName = if (bp > 0 && d != null && bp <= d.brands.size) d.brands[bp - 1].name else ""
+        prefs.edit()
+            .putString("mode", if (detector.mode == Mode.LIVE) "live" else "recorded")
+            .putInt("sens", detector.sensitivity)
+            .putBoolean("auto", autoBox.isChecked)
+            .putBoolean("roku", useRoku)
+            .putString("rokuIp", rokuIpEdit.text.toString().trim())
+            .putInt("remote", remoteSpinner.selectedItemPosition)
+            .putString("brand", brandName)
+            .putString("set", activeSet?.id ?: "")
+            .apply()
     }
 
     // ------------------------------------------------------------ UI helpers
@@ -319,7 +338,9 @@ class MainActivity : ComponentActivity() {
         liveBtn.id = View.generateViewId()
         modeGroup.addView(recBtn)
         modeGroup.addView(liveBtn)
-        modeGroup.check(recBtn.id)
+        val savedLive = prefs.getString("mode", "recorded") == "live"
+        modeGroup.check(if (savedLive) liveBtn.id else recBtn.id)
+        detector.mode = if (savedLive) Mode.LIVE else Mode.RECORDED
         modeGroup.setOnCheckedChangeListener { _, id ->
             detector.mode = if (id == recBtn.id) Mode.RECORDED else Mode.LIVE
         }
@@ -327,7 +348,8 @@ class MainActivity : ComponentActivity() {
         put(watchCard, text("Sensitivity (higher flags more as ads)", 14f, INK, true), 14)
         val seek = SeekBar(this)
         seek.max = 100
-        seek.progress = 50
+        seek.progress = prefs.getInt("sens", 50)
+        detector.sensitivity = seek.progress
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 detector.sensitivity = p
@@ -348,7 +370,9 @@ class MainActivity : ComponentActivity() {
         rokuBtn.id = View.generateViewId()
         ctlGroup.addView(irBtn)
         ctlGroup.addView(rokuBtn)
-        ctlGroup.check(irBtn.id)
+        val savedRoku = prefs.getBoolean("roku", false)
+        ctlGroup.check(if (savedRoku) rokuBtn.id else irBtn.id)
+        useRoku = savedRoku
         ctlGroup.setOnCheckedChangeListener { _, id ->
             useRoku = (id == rokuBtn.id)
             refreshControlUi()
@@ -381,6 +405,7 @@ class MainActivity : ComponentActivity() {
         put(irBox, manualBox, 8)
         remoteSpinner = Spinner(this)
         remoteSpinner.adapter = spinnerAdapter(Remotes.all.map { it.name })
+        remoteSpinner.setSelection(prefs.getInt("remote", 0).coerceIn(0, Remotes.all.size - 1))
         put(manualBox, remoteSpinner, 0)
         muteEdit = hexField("Mute (8 hex digits)")
         playEdit = hexField("Play (8 hex digits)")
@@ -424,6 +449,7 @@ class MainActivity : ComponentActivity() {
         put(tvCard, rokuBox, 6)
         put(rokuBox, text("Roku IP address (Roku Settings > Network > About), or tap Find Roku", 14f, INK, true), 6)
         rokuIpEdit = field("for example 192.168.1.50")
+        rokuIpEdit.setText(prefs.getString("rokuIp", "") ?: "")
         put(rokuBox, rokuIpEdit, 4)
         val findRoku = styledButton("Find Roku", false)
         findRoku.setOnClickListener {
@@ -457,7 +483,7 @@ class MainActivity : ComponentActivity() {
 
         autoBox = CheckBox(this)
         autoBox.text = "Send commands automatically when an ad starts and ends"
-        autoBox.isChecked = false
+        autoBox.isChecked = prefs.getBoolean("auto", false)
         put(tvCard, autoBox, 12)
 
         // log and debug
@@ -495,7 +521,10 @@ class MainActivity : ComponentActivity() {
         names.add(MANUAL_LABEL)
         if (d != null) for (b in d.brands) names.add(b.name)
         brandSpinner.adapter = spinnerAdapter(names)
-        brandSpinner.setSelection(0)
+        val savedBrand = prefs.getString("brand", "") ?: ""
+        val at = if (savedBrand.isEmpty()) -1 else names.indexOf(savedBrand)
+        pendingSetId = if (at > 0) prefs.getString("set", "") else null
+        brandSpinner.setSelection(if (at > 0) at else 0)
         refreshControlUi()
     }
 
@@ -506,7 +535,11 @@ class MainActivity : ComponentActivity() {
         } else {
             val sets = d.brands[pos - 1].sets
             setSpinner.adapter = spinnerAdapter(sets.map { it.summary() })
-            var best = sets.indexOfFirst { it.play >= 0 && it.ff >= 0 }
+            var best = -1
+            val saved = pendingSetId
+            if (!saved.isNullOrEmpty()) best = sets.indexOfFirst { it.id == saved }
+            pendingSetId = null
+            if (best < 0) best = sets.indexOfFirst { it.play >= 0 && it.ff >= 0 }
             if (best < 0) best = 0
             setSpinner.setSelection(best)
             activeSet = sets[best]
