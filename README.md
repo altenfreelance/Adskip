@@ -26,3 +26,9 @@ the APK and install it (allow "install unknown apps" for your browser when asked
   Because the show is noticed late, fast-forward can overshoot into the first moments of the show.
   Rewind a little if that happens. This is the first thing to tune.
 - Live TV cannot be skipped, so that mode only mutes.
+
+## Pipeline
+
+Every pull request runs the unit tests and a full debug build. Only code that
+lands on `main` publishes a release with the APK. To make that a hard rule, turn on
+GitHub branch protection for `main` and require the "build" check to pass.

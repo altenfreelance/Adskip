@@ -1,8 +1,11 @@
 name: Build APK
 
+# Pull requests run the tests and a full build. Only code that lands on main
+# publishes a release with the installable APK.
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -23,8 +26,15 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+      - name: Unit tests and debug build
+        run: gradle --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Keep the test report if tests fail
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/
 
       - name: Keep the APK as a run artifact
         uses: actions/upload-artifact@v4
@@ -33,6 +43,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish the APK as a release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
