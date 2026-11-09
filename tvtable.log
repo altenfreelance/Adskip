@@ -1,0 +1,12 @@
+TV code table written to app/src/main/assets/tvcodes.json (62199 bytes)
+brands: 100  unique codes: 178
+  duplicate sets dropped: 123
+  files: 397
+  files without usable mute: 82
+  sets: 192
+  sets with play and fast-forward: 46
+  skipped protocol Kaseikyo: 31
+  skipped protocol Pioneer: 1
+  skipped protocol RC6: 22
+  skipped protocol RCA: 15
+  skipped raw: 1
