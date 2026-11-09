@@ -30,7 +30,9 @@ jobs:
 
       - name: Build the TV code table for the app
         continue-on-error: true
-        run: python3 tools/build_tv_codes.py irdb/TVs app/src/main/assets/tvcodes.json
+        run: |
+          set -o pipefail
+          python3 tools/build_tv_codes.py irdb/TVs app/src/main/assets/tvcodes.json 2>&1 | tee tvtable.log
 
       - uses: actions/setup-java@v4
         with:
@@ -42,7 +44,9 @@ jobs:
           gradle-version: "8.9"
 
       - name: Unit tests and debug build
-        run: gradle --no-daemon testDebugUnitTest assembleDebug
+        run: |
+          set -o pipefail
+          gradle --no-daemon testDebugUnitTest assembleDebug 2>&1 | tee build.log
 
       - name: Keep the test report if tests fail
         if: failure()
@@ -64,3 +68,24 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Commercial Skip build ${{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Save the build logs to the ci-logs branch
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/logs
+          cp build.log tvtable.log /tmp/logs/ 2>/dev/null || true
+          tail -n 300 /tmp/logs/build.log > /tmp/logs/build-tail.txt 2>/dev/null || true
+          {
+            echo "status: ${{ job.status }}"
+            echo "commit: ${{ github.sha }}"
+            echo "run: ${{ github.run_number }}"
+          } > /tmp/logs/status.txt
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git checkout -q --orphan ci-logs
+          git rm -rf -q . || true
+          cp /tmp/logs/* .
+          git add -f status.txt build-tail.txt build.log tvtable.log 2>/dev/null || git add -f status.txt
+          git commit -q -m "CI logs for run ${{ github.run_number }}"
+          git push -f origin ci-logs
