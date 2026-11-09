@@ -14,14 +14,15 @@ class AdDetectorTest {
     private fun events(
         mode: Mode,
         adList: List<Pair<Double, Double>>,
-        burstSpan: Pair<Double, Double>?
+        burstSpan: Pair<Double, Double>?,
+        totalSeconds: Int = 360
     ): List<Pair<Boolean, Double>> {
         val d = AdDetector()
         d.mode = mode
         val rnd = Random(7)
         var wander = 0.0
         val out = ArrayList<Pair<Boolean, Double>>()
-        for (i in 0 until 720) {
+        for (i in 0 until totalSeconds * 2) {
             val t = i * 0.5
             val realAd = adList.any { t >= it.first && t < it.second }
             val inBurst = burstSpan != null && t >= burstSpan.first && t < burstSpan.second
@@ -55,6 +56,15 @@ class AdDetectorTest {
     @Test
     fun recordedModeFindsBothBreaksAndIgnoresActionScene() {
         checkBreaks(events(Mode.RECORDED, ads, burst))
+    }
+
+    @Test
+    fun regularlySpacedBreaksAreAllFoundAndTheActionSceneIsStillIgnored() {
+        val longAds = listOf(70.0 to 130.0, 490.0 to 550.0, 910.0 to 970.0)
+        val ev = events(Mode.LIVE, longAds, 700.0 to 708.0, 1100)
+        assertEquals(6, ev.size)
+        assertTrue("third break found", ev[4].first && ev[4].second in 910.0..930.0)
+        assertTrue("third break over", !ev[5].first && ev[5].second in 970.0..992.0)
     }
 
     @Test

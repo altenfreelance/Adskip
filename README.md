@@ -27,7 +27,7 @@ the APK and install it (allow "install unknown apps" for your browser when asked
 
 - The screen stays on while watching. Keep the phone plugged in.
 - Ads are noticed about 8 seconds after they start, and the show is noticed about 6 seconds after it returns.
-- Fast-forward ends when the logo returns or after 2 minutes, whichever comes first.
+- Fast-forward ends when the logo returns or when the "Longest fast-forward" limit (default 45 s) runs out, whichever comes first.
   Because the show is noticed late, fast-forward can overshoot into the first moments of the show.
   Rewind a little if that happens. This is the first thing to tune.
 - If the AD/SHOW call is wrong, tap Copy debug data and send it to Claude. It holds the last two minutes of readings.
@@ -38,6 +38,13 @@ the APK and install it (allow "install unknown apps" for your browser when asked
 Every pull request runs the unit tests and a full debug build. Only code that
 lands on `main` publishes a release with the APK. To make that a hard rule, turn on
 GitHub branch protection for `main` and require the "build" check to pass.
+
+## What it knows about TV
+
+Ad breaks come at fairly regular spacing, last a minute or more, and rarely follow
+each other closely. The detector remembers when earlier breaks began, leans slightly
+toward calling an ad near the next expected break, and is slightly more skeptical
+for four minutes after a break ends.
 
 ## Credits
 

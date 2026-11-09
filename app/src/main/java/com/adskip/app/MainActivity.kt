@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
     private var running = false
     private var useRoku = false
     private var adStart = 0L
+    private var ffCapMs = 45_000L
     private var runStart = 0L
     private var audio: AudioMeter? = null
     private var executor: ExecutorService? = null
@@ -187,6 +188,7 @@ class MainActivity : ComponentActivity() {
         prefs.edit()
             .putString("mode", if (detector.mode == Mode.LIVE) "live" else "recorded")
             .putInt("sens", detector.sensitivity)
+            .putInt("ffcap", (ffCapMs / 1000).toInt())
             .putBoolean("auto", autoBox.isChecked)
             .putBoolean("roku", useRoku)
             .putString("rokuIp", rokuIpEdit.text.toString().trim())
@@ -358,6 +360,25 @@ class MainActivity : ComponentActivity() {
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
         put(watchCard, seek, 4)
+
+        val capLabel = text("", 14f, INK, true)
+        put(watchCard, capLabel, 14)
+        val capSeek = SeekBar(this)
+        capSeek.max = 105
+        val savedCap = prefs.getInt("ffcap", 45).coerceIn(15, 120)
+        capSeek.progress = savedCap - 15
+        ffCapMs = savedCap * 1000L
+        capLabel.text = "Longest fast-forward: $savedCap s"
+        capSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                ffCapMs = (p + 15) * 1000L
+                capLabel.text = "Longest fast-forward: " + (p + 15) + " s"
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        put(watchCard, capSeek, 4)
+        put(watchCard, text("Fast-forward stops after this long even if the show has not been spotted. Lower it if the show gets skipped.", 12f, MUTED), 4)
 
         // TV control
         val tvCard = card(col, "Your TV")
@@ -652,7 +673,7 @@ class MainActivity : ComponentActivity() {
         if (r.changed) {
             onAdChange(r.inAd, "")
         } else if (r.inAd && detector.mode == Mode.RECORDED &&
-            SystemClock.elapsedRealtime() - adStart > 120_000L
+            SystemClock.elapsedRealtime() - adStart > ffCapMs
         ) {
             detector.forceExit()
             onAdChange(false, " (fast-forward time limit)")

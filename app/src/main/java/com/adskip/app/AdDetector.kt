@@ -36,19 +36,46 @@ class AdDetector {
     private var below = 0
     private var adSteps = 0
     private var cooldown = 0
+    private var clock = 0                     // steps since the detector started
+    private val breakStarts = ArrayList<Int>() // when earlier ad breaks began
+    private var lastBreakEnd = -1
 
     fun threshold(): Double = 0.7 - sensitivity * 0.004
+
+    /**
+     * What we know about how TV is laid out. Breaks come at fairly regular
+     * spacing and almost never right after another one, so the bar drops a
+     * little near the expected next break and rises a little just after a break.
+     */
+    private fun priorShift(): Double {
+        var shift = 0.0
+        if (!inAd && lastBreakEnd >= 0) {
+            val sinceEnd = clock - lastBreakEnd
+            if (sinceEnd in COOLDOWN_STEPS until SKEPTIC_STEPS) shift += 0.08
+        }
+        if (breakStarts.size >= 2) {
+            val gaps = ArrayList<Int>()
+            for (i in 1 until breakStarts.size) gaps.add(breakStarts[i] - breakStarts[i - 1])
+            val typical = gaps.sorted()[gaps.size / 2]
+            val sinceStart = clock - breakStarts.last()
+            if (typical > 0 && Math.abs(sinceStart - typical) <= typical * 0.15) shift -= 0.08
+        }
+        return shift
+    }
 
     fun reset() {
         cutHist.clear()
         logoHist.clear()
         dbHist.clear()
         dbLong.clear()
+        breakStarts.clear()
         inAd = false
         above = 0
         below = 0
         adSteps = 0
         cooldown = 0
+        clock = 0
+        lastBreakEnd = -1
     }
 
     fun forceExit() {
@@ -56,9 +83,11 @@ class AdDetector {
         above = 0
         below = 0
         cooldown = COOLDOWN_STEPS
+        lastBreakEnd = clock
     }
 
     fun step(s: Step): Result {
+        clock++
         if (cooldown > 0) cooldown--
         if (inAd) adSteps++
         push(cutHist, if (s.cut) 1 else 0, WIN)
@@ -98,7 +127,7 @@ class AdDetector {
         den += 0.25
         val score = num / den
 
-        val thr = threshold()
+        val thr = threshold() + priorShift()
         var changed = false
         if (ready) {
             if (!inAd) {
@@ -108,6 +137,7 @@ class AdDetector {
                     above = 0
                     below = 0
                     adSteps = 0
+                    breakStarts.add(clock - ENTER_STEPS)
                     changed = true
                 }
             } else if (adSteps >= MIN_AD_STEPS) {
@@ -119,6 +149,7 @@ class AdDetector {
                     above = 0
                     below = 0
                     cooldown = COOLDOWN_STEPS
+                    lastBreakEnd = clock
                     changed = true
                 }
             }
@@ -144,7 +175,8 @@ class AdDetector {
         const val ENTER_STEPS = 8   // 4 s above threshold to call an ad
         const val EXIT_STEPS = 16   // 8 s clearly below threshold to call the show back
         const val MIN_AD_STEPS = 24 // an ad lasts at least 12 s before it can end
-        const val COOLDOWN_STEPS = 40 // 20 s after an ad ends before another can start
+        const val COOLDOWN_STEPS = 120 // 60 s after an ad ends before another can start
+        const val SKEPTIC_STEPS = 480  // for the next 4 minutes the bar is a little higher
         const val SILENCE_DB = -60.0
     }
 }
