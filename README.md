@@ -10,11 +10,16 @@ Push to `main`. GitHub Actions builds `app-debug.apk` and attaches it to a
 release named "Ad Skip build N". Open the Releases page on the phone, download
 the APK and install it (allow "install unknown apps" for your browser when asked).
 
+## Controlling the TV
+
+- **IR blaster:** uses the phone's IR blaster. Built-in codes cover Samsung and LG. For other TVs type the codes in by hand.
+- **Roku over Wi-Fi:** works with Roku players and Roku TVs, no IR codes needed. Tap Find Roku, or type the Roku's IP address.
+
 ## First run
 
 1. Allow camera and microphone.
-2. Pick your TV brand and tap Test Mute, Test Play and Test FF with the phone aimed at the TV.
-   The built-in codes are best guesses. If a button does nothing, edit the hex code.
+2. Pick how you control the TV, then tap Mute, Play and FF under the test buttons.
+   For IR, the built-in codes are best guesses. If a button does nothing, edit the hex code.
 3. Prop the phone up so the TV fills the camera view, then tap Start watching.
 4. Leave "Send commands automatically" off until the log shows sensible ad starts and ends.
 
@@ -25,6 +30,7 @@ the APK and install it (allow "install unknown apps" for your browser when asked
 - Fast-forward ends when the logo returns or after 2 minutes, whichever comes first.
   Because the show is noticed late, fast-forward can overshoot into the first moments of the show.
   Rewind a little if that happens. This is the first thing to tune.
+- If the AD/SHOW call is wrong, tap Copy debug data and send it to Claude. It holds the last two minutes of readings.
 - Live TV cannot be skipped, so that mode only mutes.
 
 ## Pipeline

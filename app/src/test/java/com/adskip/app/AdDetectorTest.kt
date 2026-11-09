@@ -42,9 +42,9 @@ class AdDetectorTest {
     private fun checkBreaks(ev: List<Pair<Boolean, Double>>) {
         assertEquals(4, ev.size)
         assertTrue("first ad start", ev[0].first && ev[0].second in 72.0..90.0)
-        assertTrue("first ad end", !ev[1].first && ev[1].second in 132.0..145.0)
+        assertTrue("first ad end", !ev[1].first && ev[1].second in 132.0..152.0)
         assertTrue("second ad start", ev[2].first && ev[2].second in 228.0..246.0)
-        assertTrue("second ad end", !ev[3].first && ev[3].second in 288.0..302.0)
+        assertTrue("second ad end", !ev[3].first && ev[3].second in 288.0..308.0)
     }
 
     @Test

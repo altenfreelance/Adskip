@@ -34,6 +34,8 @@ class AdDetector {
     private val dbLong = ArrayDeque<Double>()
     private var above = 0
     private var below = 0
+    private var adSteps = 0
+    private var cooldown = 0
 
     fun threshold(): Double = 0.7 - sensitivity * 0.004
 
@@ -45,15 +47,20 @@ class AdDetector {
         inAd = false
         above = 0
         below = 0
+        adSteps = 0
+        cooldown = 0
     }
 
     fun forceExit() {
         inAd = false
         above = 0
         below = 0
+        cooldown = COOLDOWN_STEPS
     }
 
     fun step(s: Step): Result {
+        if (cooldown > 0) cooldown--
+        if (inAd) adSteps++
         push(cutHist, if (s.cut) 1 else 0, WIN)
         push(logoHist, if (s.logo) 1 else 0, WIN)
 
@@ -95,19 +102,23 @@ class AdDetector {
         var changed = false
         if (ready) {
             if (!inAd) {
-                above = if (score > thr) above + 1 else 0
+                above = if (score > thr && cooldown == 0) above + 1 else 0
                 if (above >= ENTER_STEPS) {
                     inAd = true
                     above = 0
                     below = 0
+                    adSteps = 0
                     changed = true
                 }
-            } else {
-                below = if (score <= thr - 0.05) below + 1 else 0
+            } else if (adSteps >= MIN_AD_STEPS) {
+                // Real ad breaks last at least ~12 s. The show must look like a show
+                // (clearly below the entry bar) for 8 s before we call it back.
+                below = if (score <= thr - 0.10) below + 1 else 0
                 if (below >= EXIT_STEPS) {
                     inAd = false
                     above = 0
                     below = 0
+                    cooldown = COOLDOWN_STEPS
                     changed = true
                 }
             }
@@ -131,7 +142,9 @@ class AdDetector {
         const val WIN = 13          // 6.5 s of history
         const val LONG = 240        // 2 min of volume history for the baseline
         const val ENTER_STEPS = 8   // 4 s above threshold to call an ad
-        const val EXIT_STEPS = 8    // 4 s below threshold to call the show back
+        const val EXIT_STEPS = 16   // 8 s clearly below threshold to call the show back
+        const val MIN_AD_STEPS = 24 // an ad lasts at least 12 s before it can end
+        const val COOLDOWN_STEPS = 40 // 20 s after an ad ends before another can start
         const val SILENCE_DB = -60.0
     }
 }

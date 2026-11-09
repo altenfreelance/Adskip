@@ -1,6 +1,9 @@
 package com.adskip.app
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -25,6 +28,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -43,15 +47,19 @@ import java.util.concurrent.atomic.AtomicInteger
 class MainActivity : ComponentActivity() {
 
     private lateinit var ir: IrSender
+    private val roku = RokuControl()
     private val detector = AdDetector()
     private val main = Handler(Looper.getMainLooper())
 
     private val cutCount = AtomicInteger(0)
     @Volatile private var logoNow = false
+    @Volatile private var diffNow = 0f
     @Volatile private var dbNow: Double? = null
 
     private var running = false
+    private var useRoku = false
     private var adStart = 0L
+    private var runStart = 0L
     private var audio: AudioMeter? = null
     private var executor: ExecutorService? = null
     private var provider: ProcessCameraProvider? = null
@@ -66,8 +74,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var muteEdit: EditText
     private lateinit var playEdit: EditText
     private lateinit var ffEdit: EditText
+    private lateinit var rokuIpEdit: EditText
 
     private val logLines = ArrayList<String>()
+    private val debugRows = ArrayList<String>()
     private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     private val permLauncher = registerForActivityResult(
@@ -142,20 +152,20 @@ class MainActivity : ComponentActivity() {
         add(startBtn, 12)
 
         add(label("What are you watching?", 14f, true), 20)
-        val group = RadioGroup(this)
+        val modeGroup = RadioGroup(this)
         val recBtn = RadioButton(this)
         recBtn.text = "Recorded show (fast-forward the ad)"
         recBtn.id = View.generateViewId()
         val liveBtn = RadioButton(this)
         liveBtn.text = "Live TV (mute during the ad)"
         liveBtn.id = View.generateViewId()
-        group.addView(recBtn)
-        group.addView(liveBtn)
-        group.check(recBtn.id)
-        group.setOnCheckedChangeListener { _, id ->
+        modeGroup.addView(recBtn)
+        modeGroup.addView(liveBtn)
+        modeGroup.check(recBtn.id)
+        modeGroup.setOnCheckedChangeListener { _, id ->
             detector.mode = if (id == recBtn.id) Mode.RECORDED else Mode.LIVE
         }
-        add(group, 4)
+        add(modeGroup, 4)
 
         add(label("Sensitivity (higher flags more as ads)", 14f, true), 16)
         val seek = SeekBar(this)
@@ -170,7 +180,45 @@ class MainActivity : ComponentActivity() {
         })
         add(seek, 4)
 
-        add(label("TV remote codes", 14f, true), 20)
+        add(label("How do you control the TV?", 14f, true), 20)
+        val ctlGroup = RadioGroup(this)
+        val irBtn = RadioButton(this)
+        irBtn.text = "IR blaster (TV remote codes)"
+        irBtn.id = View.generateViewId()
+        val rokuBtn = RadioButton(this)
+        rokuBtn.text = "Roku over Wi-Fi"
+        rokuBtn.id = View.generateViewId()
+        ctlGroup.addView(irBtn)
+        ctlGroup.addView(rokuBtn)
+        ctlGroup.check(irBtn.id)
+        ctlGroup.setOnCheckedChangeListener { _, id -> useRoku = (id == rokuBtn.id) }
+        add(ctlGroup, 4)
+
+        add(label("Roku: IP address (Roku Settings > Network > About), or tap Find Roku"), 12)
+        rokuIpEdit = EditText(this)
+        rokuIpEdit.hint = "for example 192.168.1.50"
+        rokuIpEdit.setSingleLine()
+        rokuIpEdit.typeface = Typeface.MONOSPACE
+        add(rokuIpEdit, 0)
+        val findBtn = Button(this)
+        findBtn.text = "Find Roku"
+        findBtn.setOnClickListener {
+            log("Looking for a Roku on Wi-Fi...")
+            roku.discover(this) { ip ->
+                runOnUiThread {
+                    if (ip != null) {
+                        rokuIpEdit.setText(ip)
+                        log("Found a Roku at $ip.")
+                    } else {
+                        log("No Roku found. Type its IP address instead.")
+                    }
+                }
+            }
+        }
+        add(findBtn, 4)
+        add(label("If a Roku key does nothing, check Roku Settings > System > Advanced system settings > Control by mobile apps, and allow network access."), 4)
+
+        add(label("IR remote codes", 14f, true), 20)
         remoteSpinner = Spinner(this)
         remoteSpinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, Remotes.all.map { it.name }
@@ -200,10 +248,15 @@ class MainActivity : ComponentActivity() {
         add(label("Test each button with the phone aimed at the TV:"), 12)
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
-        for (item in listOf("Mute" to muteEdit, "Play" to playEdit, "FF" to ffEdit)) {
+        val tests = listOf(
+            Triple("Mute", muteEdit, "VolumeMute"),
+            Triple("Play", playEdit, "Play"),
+            Triple("FF", ffEdit, "Fwd")
+        )
+        for (item in tests) {
             val b = Button(this)
             b.text = item.first
-            b.setOnClickListener { send(item.first, item.second, true) }
+            b.setOnClickListener { send(item.first, item.second, item.third, true) }
             row.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         add(row, 4)
@@ -217,6 +270,12 @@ class MainActivity : ComponentActivity() {
         logView = label("", 12f)
         logView.typeface = Typeface.MONOSPACE
         add(logView, 4)
+
+        val copyBtn = Button(this)
+        copyBtn.text = "Copy debug data"
+        copyBtn.setOnClickListener { copyDebug() }
+        add(copyBtn, 12)
+        add(label("After a bad stretch, tap this and paste the result into your chat with Claude."), 4)
 
         val scroll = ScrollView(this)
         scroll.addView(col)
@@ -255,6 +314,9 @@ class MainActivity : ComponentActivity() {
         cutCount.set(0)
         dbNow = null
         logoNow = false
+        diffNow = 0f
+        debugRows.clear()
+        runStart = SystemClock.elapsedRealtime()
         running = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         startBtn.text = "Stop watching"
@@ -292,9 +354,10 @@ class MainActivity : ComponentActivity() {
             .setTargetResolution(Size(640, 480))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
-        analysis.setAnalyzer(exec, FrameAnalyzer { cut, logo ->
+        analysis.setAnalyzer(exec, FrameAnalyzer { cut, logo, diff ->
             if (cut) cutCount.incrementAndGet()
             logoNow = logo
+            diffNow = diff
         })
 
         p.unbindAll()
@@ -323,7 +386,10 @@ class MainActivity : ComponentActivity() {
     private fun step() {
         val db = dbNow
         dbNow = null
-        val r = detector.step(AdDetector.Step(cutCount.getAndSet(0) > 0, logoNow, db))
+        val cutNow = cutCount.getAndSet(0) > 0
+        val logo = logoNow
+        val diff = diffNow
+        val r = detector.step(AdDetector.Step(cutNow, logo, db))
         if (r.changed) {
             onAdChange(r.inAd, "")
         } else if (r.inAd && detector.mode == Mode.RECORDED &&
@@ -339,36 +405,74 @@ class MainActivity : ComponentActivity() {
         val vol = if (r.dbDelta == null) "n/a" else String.format(Locale.US, "%+.1f dB", r.dbDelta)
         statsView.text = String.format(
             Locale.US,
-            "cuts in 6s: %d   volume: %s   logo: %d%%\nscore %.2f   threshold %.2f",
-            r.cuts, vol, r.logoPct, r.score, r.threshold
+            "cuts in 6s: %d   volume: %s   logo: %d%%\nscore %.2f   threshold %.2f   change %.1f",
+            r.cuts, vol, r.logoPct, r.score, r.threshold, diff
         )
+
+        val t = (SystemClock.elapsedRealtime() - runStart) / 1000.0
+        val dbText = if (db == null) "" else String.format(Locale.US, "%.1f", db)
+        val deltaText = if (r.dbDelta == null) "" else String.format(Locale.US, "%.1f", r.dbDelta)
+        debugRows.add(
+            String.format(
+                Locale.US, "%.1f,%.1f,%d,%d,%s,%d,%d,%s,%.2f,%d",
+                t, diff, if (cutNow) 1 else 0, if (logo) 1 else 0, dbText,
+                r.cuts, r.logoPct, deltaText, r.score, if (ad) 1 else 0
+            )
+        )
+        while (debugRows.size > 240) debugRows.removeAt(0)
     }
 
     private fun onAdChange(inAd: Boolean, note: String) {
         if (inAd) {
             adStart = SystemClock.elapsedRealtime()
             log("Ad started.")
-            if (detector.mode == Mode.RECORDED) send("FAST_FORWARD", ffEdit, false)
-            else send("MUTE", muteEdit, false)
+            if (detector.mode == Mode.RECORDED) send("FAST_FORWARD", ffEdit, "Fwd", false)
+            else send("MUTE", muteEdit, "VolumeMute", false)
         } else {
             log("Show is back.$note")
-            if (detector.mode == Mode.RECORDED) send("PLAY", playEdit, false)
-            else send("MUTE (restore)", muteEdit, false)
+            if (detector.mode == Mode.RECORDED) send("PLAY", playEdit, "Play", false)
+            else send("MUTE (restore)", muteEdit, "VolumeMute", false)
         }
     }
 
-    // ------------------------------------------------------------------ IR
+    private fun copyDebug() {
+        if (debugRows.isEmpty()) {
+            log("No data yet. Start watching first.")
+            return
+        }
+        val header = "t,change,cut,logo,mic_db,cuts_6s,logo_pct,vol_delta,score,in_ad"
+        val text = "mode=${detector.mode} sensitivity=${detector.sensitivity}\n" +
+            header + "\n" + debugRows.joinToString("\n")
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("adskip debug", text))
+        Toast.makeText(this, "Copied " + debugRows.size + " rows", Toast.LENGTH_SHORT).show()
+        log("Copied " + debugRows.size + " rows of debug data.")
+    }
 
-    private fun send(name: String, field: EditText, force: Boolean) {
+    // ------------------------------------------------------------- sending
+
+    private fun send(name: String, field: EditText, rokuKey: String, force: Boolean) {
+        if (!force && !autoBox.isChecked) {
+            log("$name (not sent, automatic sending is off)")
+            return
+        }
+        if (useRoku) {
+            val ip = rokuIpEdit.text.toString().trim()
+            if (!roku.valid(ip)) {
+                log("$name: enter the Roku's IP address first.")
+                return
+            }
+            roku.host = ip
+            roku.keypress(rokuKey) { ok, msg ->
+                runOnUiThread { log("$name via Roku: " + (if (ok) "sent." else "failed ($msg).")) }
+            }
+            return
+        }
         val proto = Remotes.all[remoteSpinner.selectedItemPosition].proto
         val text = field.text.toString().trim().removePrefix("0x").removePrefix("0X")
         val value = text.toLongOrNull(16)
         if (value == null || value < 0L || value > 0xFFFFFFFFL) {
             log("$name: enter a code as 8 hex digits.")
-            return
-        }
-        if (!force && !autoBox.isChecked) {
-            log("$name (not sent, automatic sending is off)")
             return
         }
         if (!ir.available) {

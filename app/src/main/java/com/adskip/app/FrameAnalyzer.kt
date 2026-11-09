@@ -13,7 +13,7 @@ import kotlin.math.sqrt
  * static, high-contrast patch (a channel logo) sits in any screen corner.
  */
 class FrameAnalyzer(
-    private val onStep: (cut: Boolean, logo: Boolean) -> Unit
+    private val onStep: (cut: Boolean, logo: Boolean, diff: Float) -> Unit
 ) : ImageAnalysis.Analyzer {
 
     private val gridW = 64
@@ -29,6 +29,7 @@ class FrameAnalyzer(
 
     private var prev: FloatArray? = null
     private var lastTs = 0L
+    private val recent = ArrayList<Float>()   // last minute of frame-to-frame changes
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -64,11 +65,18 @@ class FrameAnalyzer(
             val p = prev
             var cut = false
             var logo = false
+            var diffVal = 0f
             if (p != null) {
                 var d = 0f
                 for (i in cur.indices) d += abs(cur[i] - p[i])
                 d /= cur.size
-                cut = d > 20f
+                // A cut must stand well above this room's usual frame-to-frame noise
+                // (screen flicker, camera grain), so the bar adapts to the setup.
+                val noise = median(recent)
+                cut = d > maxOf(20f, 3f * noise)
+                diffVal = d
+                recent.add(d)
+                if (recent.size > 120) recent.removeAt(0)
 
                 val n = (patchW * patchH).toFloat()
                 for ((cx, cy) in corners) {
@@ -90,10 +98,16 @@ class FrameAnalyzer(
                 }
             }
             prev = cur
-            onStep(cut, logo)
+            onStep(cut, logo, diffVal)
         } finally {
             image.close()
         }
+    }
+
+    private fun median(list: List<Float>): Float {
+        if (list.isEmpty()) return 0f
+        val sorted = list.sorted()
+        return sorted[sorted.size / 2]
     }
 
     private fun px(b: ByteBuffer, y: Int, x: Int, rs: Int, ps: Int): Float =
